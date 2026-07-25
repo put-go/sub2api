@@ -788,6 +788,44 @@
         </div>
       </div>
 
+      <!-- Error whitelist -->
+      <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <div class="mb-3 flex items-center justify-between">
+          <div class="pr-4">
+            <label class="input-label mb-0" for="bulk-edit-error-whitelist-enabled">
+              {{ t('admin.accounts.errorWhitelist') }}
+            </label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.errorWhitelistDesc') }}
+            </p>
+          </div>
+          <input
+            id="bulk-edit-error-whitelist-enabled"
+            v-model="enableErrorWhitelist"
+            type="checkbox"
+            class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+          />
+        </div>
+        <button
+          id="bulk-edit-error-whitelist-toggle"
+          type="button"
+          :disabled="!enableErrorWhitelist"
+          :class="[
+            'relative inline-flex h-6 w-11 flex-shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
+            !enableErrorWhitelist ? 'cursor-not-allowed opacity-50' : 'cursor-pointer',
+            errorWhitelistEnabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+          ]"
+          @click="errorWhitelistEnabled = !errorWhitelistEnabled"
+        >
+          <span
+            :class="[
+              'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
+              errorWhitelistEnabled ? 'translate-x-5' : 'translate-x-0'
+            ]"
+          />
+        </button>
+      </div>
+
       <!-- OpenAI OAuth WS mode -->
       <div v-if="allOpenAIOAuth" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
@@ -1474,6 +1512,7 @@ const enableLoadFactor = ref(false)
 const enablePriority = ref(false)
 const enableRateMultiplier = ref(false)
 const enableStatus = ref(false)
+const enableErrorWhitelist = ref(false)
 const enableGroups = ref(false)
 const enableOpenAIPassthrough = ref(false)
 const enableOpenAIFlattenNamespaces = ref(false)
@@ -1506,6 +1545,7 @@ const loadFactor = ref<number | null>(null)
 const priority = ref(1)
 const rateMultiplier = ref(1)
 const status = ref<'active' | 'inactive'>('active')
+const errorWhitelistEnabled = ref(false)
 const groupIds = ref<number[]>([])
 const openaiPassthroughEnabled = ref(false)
 // Codex namespace 工具摊平兼容开关（仅 OAuth），缺省关闭即原样保留
@@ -1697,6 +1737,11 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
 
   if (enableStatus.value) {
     updates.status = status.value
+  }
+
+  if (enableErrorWhitelist.value) {
+    const extra = ensureExtra()
+    extra.error_whitelist = errorWhitelistEnabled.value
   }
 
   if (enableGroups.value) {
@@ -1904,6 +1949,7 @@ const handleSubmit = async () => {
     enablePriority.value ||
     enableRateMultiplier.value ||
     enableStatus.value ||
+    enableErrorWhitelist.value ||
     enableGroups.value ||
     enableOpenAIWSMode.value ||
     enableOpenAIAPIKeyWSMode.value ||
@@ -2036,6 +2082,7 @@ watch(
       enablePriority.value = false
       enableRateMultiplier.value = false
       enableStatus.value = false
+      enableErrorWhitelist.value = false
       enableGroups.value = false
       enableOpenAIPassthrough.value = false
       enableOpenAIFlattenNamespaces.value = false
@@ -2052,6 +2099,7 @@ watch(
       baseUrl.value = ''
       openaiPassthroughEnabled.value = false
       openaiFlattenNamespacesEnabled.value = false
+      errorWhitelistEnabled.value = false
       modelRestrictionMode.value = 'whitelist'
       allowedModels.value = []
       modelMappings.value = []

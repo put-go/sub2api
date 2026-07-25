@@ -68,7 +68,12 @@ var schedulerNeutralExtraKeys = map[string]struct{}{
 	"session_window_utilization": {},
 }
 
-const postgresParameterBatchSize = 50000
+const (
+	postgresParameterBatchSize = 50000
+	// Error-whitelisted accounts stay available through automatic error handling.
+	// Keep this in SQL as these mutations receive only an account ID.
+	errorWhitelistSQLPredicate = "COALESCE(extra ->> 'error_whitelist', 'false') <> 'true'"
+)
 
 // NewAccountRepository 创建账户仓储实例。
 // 这是对外暴露的构造函数，返回接口类型以便于依赖注入。
@@ -486,6 +491,19 @@ func (r *accountRepository) updateLockedAccount(
 		return nil, err
 	}
 	account.Extra = extra
+	if account.IsErrorWhitelistEnabled() {
+		if account.Status == service.StatusError {
+			account.Status = service.StatusActive
+			account.Schedulable = true
+		}
+		account.ErrorMessage = ""
+		account.RateLimitedAt = nil
+		account.RateLimitResetAt = nil
+		account.OverloadUntil = nil
+		account.TempUnschedulableUntil = nil
+		account.TempUnschedulableReason = ""
+		delete(account.Extra, "model_rate_limits")
+	}
 
 	schedulable := account.Schedulable
 	if account.Status == service.StatusError {
@@ -544,6 +562,9 @@ func (r *accountRepository) updateLockedAccount(
 		builder.SetOverloadUntil(*account.OverloadUntil)
 	} else {
 		builder.ClearOverloadUntil()
+	}
+	if account.IsErrorWhitelistEnabled() {
+		builder.ClearTempUnschedulableUntil().ClearTempUnschedulableReason()
 	}
 	if account.SessionWindowStart != nil {
 		builder.SetSessionWindowStart(*account.SessionWindowStart)
@@ -1323,13 +1344,21 @@ func (r *accountRepository) BatchUpdateLastUsed(ctx context.Context, updates map
 }
 
 func (r *accountRepository) SetError(ctx context.Context, id int64, errorMsg string) error {
-	_, err := r.client.Account.Update().
-		Where(dbaccount.IDEQ(id)).
-		SetStatus(service.StatusError).
-		SetErrorMessage(errorMsg).
-		SetSchedulable(false).
-		Save(ctx)
+	result, err := r.sql.ExecContext(ctx, `
+		UPDATE accounts
+		SET status = $1,
+			error_message = $2,
+			schedulable = FALSE,
+			updated_at = NOW()
+		WHERE id = $3
+			AND deleted_at IS NULL
+			AND `+errorWhitelistSQLPredicate,
+		service.StatusError, errorMsg, id)
 	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected == 0 {
 		return err
 	}
 	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
@@ -1354,6 +1383,7 @@ func (r *accountRepository) SetGrokCredentialErrorIfMatch(
 			updated_at = NOW()
 		WHERE a.id = $3
 			AND a.deleted_at IS NULL
+			AND COALESCE(a.extra ->> 'error_whitelist', 'false') <> 'true'
 			AND a.status = $4
 			AND a.platform = $5
 			AND a.type = $6
@@ -1414,6 +1444,7 @@ func (r *accountRepository) SetGrokOAuthErrorIfCredentialsUnchanged(
 			updated_at = NOW()
 		WHERE a.id = $3
 			AND a.deleted_at IS NULL
+			AND COALESCE(a.extra ->> 'error_whitelist', 'false') <> 'true'
 			AND a.platform = $4
 			AND a.type = $5
 			AND a.status = $6
@@ -1535,6 +1566,7 @@ func (r *accountRepository) SetGrokOAuthRefreshErrorIfCredentialsUnchanged(
 			updated_at = NOW()
 		WHERE a.id = $3
 			AND a.deleted_at IS NULL
+			AND COALESCE(a.extra ->> 'error_whitelist', 'false') <> 'true'
 			AND a.platform = $4
 			AND a.type = $5
 			AND a.status = $6
@@ -1595,6 +1627,7 @@ func (r *accountRepository) SetGrokOAuthRefreshTempUnschedulableIfCredentialsUnc
 			updated_at = NOW()
 		WHERE a.id = $3
 			AND a.deleted_at IS NULL
+			AND COALESCE(a.extra ->> 'error_whitelist', 'false') <> 'true'
 			AND a.platform = $4
 			AND a.type = $5
 			AND a.status = $6
@@ -2122,12 +2155,16 @@ func (r *accountRepository) ListModelAvailabilityCandidates(
 
 func (r *accountRepository) SetRateLimited(ctx context.Context, id int64, resetAt time.Time) error {
 	now := time.Now()
-	_, err := r.client.Account.Update().
-		Where(dbaccount.IDEQ(id)).
-		SetRateLimitedAt(now).
-		SetRateLimitResetAt(resetAt).
-		Save(ctx)
+	result, err := r.sql.ExecContext(ctx, `
+		UPDATE accounts
+		SET rate_limited_at = $1, rate_limit_reset_at = $2, updated_at = NOW()
+		WHERE id = $3 AND deleted_at IS NULL AND `+errorWhitelistSQLPredicate,
+		now, resetAt, id)
 	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected == 0 {
 		return err
 	}
 	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
@@ -2142,17 +2179,18 @@ func (r *accountRepository) SetRateLimited(ctx context.Context, id int64, resetA
 // later reset boundary observed by another request or instance.
 func (r *accountRepository) SetRateLimitedIfLater(ctx context.Context, id int64, resetAt time.Time) error {
 	now := time.Now()
-	updated, err := r.client.Account.Update().
-		Where(
-			dbaccount.IDEQ(id),
-			dbaccount.Or(
-				dbaccount.RateLimitResetAtIsNil(),
-				dbaccount.RateLimitResetAtLT(resetAt),
-			),
-		).
-		SetRateLimitedAt(now).
-		SetRateLimitResetAt(resetAt).
-		Save(ctx)
+	result, err := r.sql.ExecContext(ctx, `
+		UPDATE accounts
+		SET rate_limited_at = $1, rate_limit_reset_at = $2, updated_at = NOW()
+		WHERE id = $3
+			AND deleted_at IS NULL
+			AND (rate_limit_reset_at IS NULL OR rate_limit_reset_at < $2)
+			AND `+errorWhitelistSQLPredicate,
+		now, resetAt, id)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
 	if err != nil {
 		return err
 	}
@@ -2228,7 +2266,7 @@ func (r *accountRepository) SetModelRateLimit(ctx context.Context, id int64, sco
 				true
 			),
 			updated_at = NOW()
-		WHERE id = $3 AND deleted_at IS NULL`,
+		WHERE id = $3 AND deleted_at IS NULL AND `+errorWhitelistSQLPredicate,
 		scope,
 		raw,
 		id,
@@ -2242,7 +2280,7 @@ func (r *accountRepository) SetModelRateLimit(ctx context.Context, id int64, sco
 		return err
 	}
 	if affected == 0 {
-		return service.ErrAccountNotFound
+		return nil
 	}
 	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
 		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue model rate limit failed: account=%d err=%v", id, err)
@@ -2252,11 +2290,16 @@ func (r *accountRepository) SetModelRateLimit(ctx context.Context, id int64, sco
 }
 
 func (r *accountRepository) SetOverloaded(ctx context.Context, id int64, until time.Time) error {
-	_, err := r.client.Account.Update().
-		Where(dbaccount.IDEQ(id)).
-		SetOverloadUntil(until).
-		Save(ctx)
+	result, err := r.sql.ExecContext(ctx, `
+		UPDATE accounts
+		SET overload_until = $1, updated_at = NOW()
+		WHERE id = $2 AND deleted_at IS NULL AND `+errorWhitelistSQLPredicate,
+		until, id)
 	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected == 0 {
 		return err
 	}
 	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
@@ -2274,6 +2317,7 @@ func (r *accountRepository) SetTempUnschedulable(ctx context.Context, id int64, 
 			updated_at = NOW()
 		WHERE id = $3
 			AND deleted_at IS NULL
+			AND `+errorWhitelistSQLPredicate+`
 			AND (temp_unschedulable_until IS NULL OR temp_unschedulable_until < $1)
 	`, until, reason, id)
 	if err != nil {
@@ -2311,6 +2355,7 @@ func (r *accountRepository) SetGrokCredentialTempUnschedulableIfMatch(
 			updated_at = NOW()
 		WHERE a.id = $3
 			AND a.deleted_at IS NULL
+			AND COALESCE(a.extra ->> 'error_whitelist', 'false') <> 'true'
 			AND a.status = $4
 			AND a.platform = $5
 			AND a.type = $6
@@ -2962,6 +3007,28 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 	rows, err := result.RowsAffected()
 	if err != nil {
 		return 0, err
+	}
+	if rows > 0 {
+		if enabled, ok := updates.Extra[service.AccountErrorWhitelistExtraKey].(bool); ok && enabled {
+			if _, err := exec.ExecContext(ctx, `
+				UPDATE accounts
+				SET status = CASE WHEN status = $1 THEN $2 ELSE status END,
+					schedulable = CASE WHEN status = $1 THEN TRUE ELSE schedulable END,
+					error_message = '',
+					rate_limited_at = NULL,
+					rate_limit_reset_at = NULL,
+					overload_until = NULL,
+					temp_unschedulable_until = NULL,
+					temp_unschedulable_reason = NULL,
+					extra = COALESCE(extra, '{}'::jsonb) - 'model_rate_limits',
+					updated_at = NOW()
+				WHERE id = ANY($3)
+					AND deleted_at IS NULL
+					AND COALESCE(extra ->> 'error_whitelist', 'false') = 'true'
+			`, service.StatusError, service.StatusActive, pq.Array(ids)); err != nil {
+				return 0, err
+			}
+		}
 	}
 	if updates.ProbeEnabled != nil {
 		expectedRows := int64(0)

@@ -151,7 +151,7 @@ func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Co
 //   - "openai.account_temp_unscheduled_transport_failed" — DB write attempted
 //     but returned an error.
 func (s *OpenAIGatewayService) tempUnscheduleOpenAITransportError(ctx context.Context, account *Account, safeErr string) {
-	if s == nil || account == nil {
+	if s == nil || account == nil || account.IsErrorWhitelistEnabled() {
 		return
 	}
 	until := time.Now().Add(openAITransportErrorTempUnschedDuration)

@@ -23,7 +23,29 @@ func TestAccountRepository_SetTempUnschedulable_NoRowsAffectedDoesNotWriteOutbox
 	require.NoError(t, err)
 	require.Len(t, exec.execQueries, 1)
 	require.Contains(t, exec.execQueries[0], "UPDATE accounts")
+	require.Contains(t, exec.execQueries[0], "error_whitelist")
 	require.NotContains(t, strings.Join(exec.execQueries, "\n"), "scheduler_outbox")
+}
+
+func TestAccountRepository_BulkUpdateEnablingErrorWhitelistRecoversErrorState(t *testing.T) {
+	exec := &recordingSQLExecutor{result: rowsAffectedResult(1)}
+	repo := newAccountRepositoryWithSQL(nil, exec, nil)
+
+	rows, err := repo.BulkUpdate(context.Background(), []int64{42}, service.AccountBulkUpdate{
+		Extra: map[string]any{service.AccountErrorWhitelistExtraKey: true},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, int64(1), rows)
+	require.GreaterOrEqual(t, len(exec.execQueries), 3)
+	recoverySQL := normalizeSQLWhitespace(exec.execQueries[1])
+	require.Contains(t, recoverySQL, "status = CASE WHEN status = $1 THEN $2 ELSE status END")
+	require.Contains(t, recoverySQL, "schedulable = CASE WHEN status = $1 THEN TRUE ELSE schedulable END")
+	require.Contains(t, recoverySQL, "rate_limit_reset_at = NULL")
+	require.Contains(t, recoverySQL, "temp_unschedulable_until = NULL")
+	require.Contains(t, recoverySQL, "extra = COALESCE(extra, '{}'::jsonb) - 'model_rate_limits'")
+	require.Contains(t, recoverySQL, "extra ->> 'error_whitelist'")
+	require.Contains(t, normalizeSQLWhitespace(exec.execQueries[2]), "INSERT INTO scheduler_outbox")
 }
 
 func TestAccountRepository_GrokCredentialConditionalMutationsAreEligibleAndAtomicallyPropagated(t *testing.T) {
@@ -44,6 +66,7 @@ func TestAccountRepository_GrokCredentialConditionalMutationsAreEligibleAndAtomi
 		require.Len(t, exec.execQueries, 1)
 		normalized := normalizeSQLWhitespace(exec.execQueries[0])
 		require.Contains(t, normalized, "WITH updated AS ( UPDATE accounts AS a")
+		require.Contains(t, normalized, "a.extra ->> 'error_whitelist'")
 		require.Contains(t, normalized, "a.schedulable IS TRUE")
 		require.Contains(t, normalized, "a.temp_unschedulable_until IS NULL OR a.temp_unschedulable_until <= NOW()")
 		require.Contains(t, normalized, "a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at <= NOW()")
@@ -72,6 +95,7 @@ func TestAccountRepository_GrokCredentialConditionalMutationsAreEligibleAndAtomi
 		require.Len(t, exec.execQueries, 1)
 		normalized := normalizeSQLWhitespace(exec.execQueries[0])
 		require.Contains(t, normalized, "WITH updated AS ( UPDATE accounts AS a")
+		require.Contains(t, normalized, "a.extra ->> 'error_whitelist'")
 		require.Contains(t, normalized, "a.schedulable IS TRUE")
 		require.Contains(t, normalized, "a.temp_unschedulable_until IS NULL OR a.temp_unschedulable_until <= NOW()")
 		require.Contains(t, normalized, "a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at <= NOW()")

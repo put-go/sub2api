@@ -132,6 +132,19 @@ type TempUnschedulableRule struct {
 	Description     string   `json:"description"`
 }
 
+const AccountErrorWhitelistExtraKey = "error_whitelist"
+
+// IsErrorWhitelistEnabled reports whether automatic upstream-error state is
+// forbidden for this account. Manual status/schedulable controls, expiry and
+// configured quota limits remain authoritative.
+func (a *Account) IsErrorWhitelistEnabled() bool {
+	if a == nil || a.Extra == nil {
+		return false
+	}
+	enabled, ok := a.Extra[AccountErrorWhitelistExtraKey].(bool)
+	return ok && enabled
+}
+
 func (a *Account) IsActive() bool {
 	return a.Status == StatusActive
 }
@@ -183,14 +196,16 @@ func (a *Account) IsSchedulable() bool {
 	if a.AutoPauseOnExpired && a.ExpiresAt != nil && !now.Before(*a.ExpiresAt) {
 		return false
 	}
-	if a.OverloadUntil != nil && now.Before(*a.OverloadUntil) {
-		return false
-	}
-	if a.RateLimitResetAt != nil && now.Before(*a.RateLimitResetAt) {
-		return false
-	}
-	if a.TempUnschedulableUntil != nil && now.Before(*a.TempUnschedulableUntil) {
-		return false
+	if !a.IsErrorWhitelistEnabled() {
+		if a.OverloadUntil != nil && now.Before(*a.OverloadUntil) {
+			return false
+		}
+		if a.RateLimitResetAt != nil && now.Before(*a.RateLimitResetAt) {
+			return false
+		}
+		if a.TempUnschedulableUntil != nil && now.Before(*a.TempUnschedulableUntil) {
+			return false
+		}
 	}
 	if a.IsAPIKeyOrBedrock() && a.IsQuotaExceeded() {
 		return false
@@ -218,21 +233,21 @@ func (a *Account) IsCredentialUsableForShadow() bool {
 	if a.AutoPauseOnExpired && a.ExpiresAt != nil && !now.Before(*a.ExpiresAt) {
 		return false
 	}
-	if a.TempUnschedulableUntil != nil && now.Before(*a.TempUnschedulableUntil) {
+	if !a.IsErrorWhitelistEnabled() && a.TempUnschedulableUntil != nil && now.Before(*a.TempUnschedulableUntil) {
 		return false
 	}
 	return true
 }
 
 func (a *Account) IsRateLimited() bool {
-	if a.RateLimitResetAt == nil {
+	if a.IsErrorWhitelistEnabled() || a.RateLimitResetAt == nil {
 		return false
 	}
 	return time.Now().Before(*a.RateLimitResetAt)
 }
 
 func (a *Account) IsOverloaded() bool {
-	if a.OverloadUntil == nil {
+	if a.IsErrorWhitelistEnabled() || a.OverloadUntil == nil {
 		return false
 	}
 	return time.Now().Before(*a.OverloadUntil)

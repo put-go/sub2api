@@ -766,6 +766,8 @@ export default {
       },
       autoPauseOnExpired: '过期自动暂停调度',
       autoPauseOnExpiredDesc: '启用后，账号过期将自动暂停调度',
+      errorWhitelist: '错误白名单保护',
+      errorWhitelistDesc: '开启后忽略所有上游错误状态，不会因错误、限流、过载或临时冷却进入不可调度；手动停用、过期与配额限制仍然生效。',
 	  autoPause5hThreshold: '5h 用量阈值(%)',
 	  autoPause7dThreshold: '7d 用量阈值(%)',
 	  autoPauseThresholdHint: '留空或填 0 表示使用全局默认阈值（在运维设置中配置）；填具体值则覆盖全局默认。达到阈值后仅在调度时跳过账号，不修改 schedulable。',

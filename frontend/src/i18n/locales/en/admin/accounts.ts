@@ -711,6 +711,8 @@ export default {
       },
       autoPauseOnExpired: 'Auto Pause On Expired',
       autoPauseOnExpiredDesc: 'When enabled, the account will auto pause scheduling after it expires',
+      errorWhitelist: 'Error Whitelist Protection',
+      errorWhitelistDesc: 'Ignore all upstream error states so errors, rate limits, overloads, and temporary cooldowns cannot make this account unschedulable. Manual disable, expiry, and quota limits still apply.',
 	  autoPause5hThreshold: '5h Usage Threshold (%)',
 	  autoPause7dThreshold: '7d Usage Threshold (%)',
 	  autoPauseThresholdHint: 'Leave empty or set 0 to use the global default threshold (configured in Ops settings); set a value to override the global default. Reaching the threshold only skips the account during scheduling and does not modify schedulable.',

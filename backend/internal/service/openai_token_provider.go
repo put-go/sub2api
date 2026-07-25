@@ -277,7 +277,7 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 // 必须主动剔除以避免账号被持续选中导致用户端反复 502。
 // 使用 background context 是因为请求 context 可能很快结束。
 func (p *OpenAITokenProvider) disableAccountMissingRefreshToken(account *Account, reason string) {
-	if p == nil || p.accountRepo == nil || account == nil {
+	if p == nil || p.accountRepo == nil || account == nil || account.IsErrorWhitelistEnabled() {
 		return
 	}
 	if p.runtimeBlocker != nil {
