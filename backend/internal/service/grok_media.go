@@ -805,7 +805,7 @@ func (s *OpenAIGatewayService) forwardGrokMediaVideoContent(
 		return nil, err
 	}
 
-	contentURL, err := grokMediaSignedVideoContentURL(statusBody, requestID)
+	contentURL, err := grokMediaSignedVideoContentURL(statusBody)
 	if err != nil {
 		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 		return nil, err
@@ -881,16 +881,9 @@ func (s *OpenAIGatewayService) forwardGrokMediaVideoContent(
 	return result, nil
 }
 
-func grokMediaSignedVideoContentURL(body []byte, requestID string) (string, error) {
+func grokMediaSignedVideoContentURL(body []byte) (string, error) {
 	rawURL := strings.TrimSpace(gjson.GetBytes(body, "video.url").String())
 	if rawURL == "" {
-		return "", nil
-	}
-	// An upstream Sub2API rewrites protected content URLs to its own proxy
-	// endpoint. Treat that as an authenticated relay path, not as a signed URL;
-	// the caller will rebuild it against the configured account base URL and
-	// attach the upstream API key.
-	if isGrokMediaVideoContentURL(rawURL, requestID) {
 		return "", nil
 	}
 	parsed, err := url.Parse(rawURL)
