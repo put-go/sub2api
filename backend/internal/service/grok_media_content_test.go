@@ -217,7 +217,7 @@ func TestForwardGrokMediaContentFetchesValidatedSignedURLWithoutCredentials(t *t
 	require.Empty(t, upstream.requests[1].Header.Get("Authorization"))
 	require.Empty(t, upstream.requests[1].Header.Get("User-Agent"))
 	require.Equal(t, "bytes=0-12", upstream.requests[1].Header.Get("Range"))
-	require.True(t, HTTPUpstreamRedirectsDisabled(upstream.requests[1].Context()))
+	require.False(t, HTTPUpstreamRedirectsDisabled(upstream.requests[1].Context()))
 }
 
 func TestForwardGrokMediaContentFollowsAuthenticatedSub2APIRelay(t *testing.T) {
@@ -250,6 +250,79 @@ func TestForwardGrokMediaContentFollowsAuthenticatedSub2APIRelay(t *testing.T) {
 			require.Len(t, upstream.requests, 2)
 			require.Equal(t, "https://relay.example/v1/videos/task-1/content", upstream.requests[1].URL.String())
 			require.Equal(t, "Bearer upstream-key", upstream.requests[1].Header.Get("Authorization"))
+		})
+	}
+}
+
+func TestForwardGrokMediaContentFollowsAuthenticatedCustomUpstreamURL(t *testing.T) {
+	upstream := &grokMediaContentUpstreamStub{
+		responses: []*http.Response{
+			grokMediaContentStatusResponse(`{"status":"done","video":{"url":"https://relay.example/downloads/task-1.mp4"}}`),
+			{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"video/mp4"}},
+				Body:       io.NopCloser(strings.NewReader("video-payload")),
+			},
+		},
+	}
+	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+	c, recorder := grokMediaContentTestContext(http.MethodGet, "https://api.example/v1/videos/task-1/content", nil)
+
+	_, err := svc.ForwardGrokMedia(
+		context.Background(), c, grokMediaContentTestAccount(),
+		GrokMediaEndpointVideoContent, "task-1", nil, "",
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "video-payload", recorder.Body.String())
+	require.Len(t, upstream.requests, 2)
+	require.Equal(t, "https://relay.example/downloads/task-1.mp4", upstream.requests[1].URL.String())
+	require.Equal(t, "Bearer upstream-key", upstream.requests[1].Header.Get("Authorization"))
+	require.True(t, HTTPUpstreamRedirectsDisabled(upstream.requests[1].Context()))
+}
+
+func TestGrokMediaVideoContentURLFromStatusValidatesAccountOrigin(t *testing.T) {
+	account := grokMediaContentTestAccount()
+	cfg := &config.Config{}
+	for _, tc := range []struct {
+		name       string
+		rawURL     string
+		wantURL    string
+		wantSigned bool
+		wantErr    bool
+	}{
+		{
+			name:    "same origin",
+			rawURL:  "https://relay.example/downloads/task-1.mp4",
+			wantURL: "https://relay.example/downloads/task-1.mp4",
+		},
+		{
+			name:    "same origin explicit default port",
+			rawURL:  "https://relay.example:443/downloads/task-1.mp4",
+			wantURL: "https://relay.example:443/downloads/task-1.mp4",
+		},
+		{
+			name:       "signed CDN",
+			rawURL:     "https://vidgen.x.ai/signed/task-1.mp4",
+			wantURL:    "https://vidgen.x.ai/signed/task-1.mp4",
+			wantSigned: true,
+		},
+		{name: "HTTP", rawURL: "http://relay.example/downloads/task-1.mp4", wantErr: true},
+		{name: "different host", rawURL: "https://relay.attacker.invalid/downloads/task-1.mp4", wantErr: true},
+		{name: "different port", rawURL: "https://relay.example:444/downloads/task-1.mp4", wantErr: true},
+		{name: "userinfo", rawURL: "https://token@relay.example/downloads/task-1.mp4", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"video":{"url":"` + tc.rawURL + `"}}`)
+			gotURL, gotSigned, err := grokMediaVideoContentURLFromStatus(body, "task-1", account, cfg)
+			if tc.wantErr {
+				require.ErrorContains(t, err, "unsupported video content URL")
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.wantURL, gotURL)
+			require.Equal(t, tc.wantSigned, gotSigned)
 		})
 	}
 }

@@ -805,13 +805,12 @@ func (s *OpenAIGatewayService) forwardGrokMediaVideoContent(
 		return nil, err
 	}
 
-	contentURL, err := grokMediaSignedVideoContentURL(statusBody, requestID)
+	contentURL, signedContent, err := grokMediaVideoContentURLFromStatus(statusBody, requestID, account, s.cfg)
 	if err != nil {
 		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 		return nil, err
 	}
-	signedContent := contentURL != ""
-	if !signedContent {
+	if contentURL == "" {
 		contentURL, err = buildGrokMediaURL(account, s.cfg, GrokMediaEndpointVideoContent, requestID)
 		if err != nil {
 			SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
@@ -819,8 +818,13 @@ func (s *OpenAIGatewayService) forwardGrokMediaVideoContent(
 		}
 	}
 
+	contentCtx := WithHTTPUpstreamRedirectsDisabled(upstreamCtx)
+	if signedContent {
+		// Signed CDN URLs carry no account credentials, so their CDN redirect is safe.
+		contentCtx = upstreamCtx
+	}
 	contentReq, err := http.NewRequestWithContext(
-		WithHTTPUpstreamRedirectsDisabled(upstreamCtx),
+		contentCtx,
 		http.MethodGet,
 		contentURL,
 		nil,
@@ -881,6 +885,56 @@ func (s *OpenAIGatewayService) forwardGrokMediaVideoContent(
 	return result, nil
 }
 
+// grokMediaVideoContentURLFromStatus resolves a completed video's download URL.
+// Standard relay paths are rebuilt against the configured upstream. A complete
+// URL from that same HTTPS origin is retained and authenticated; only xAI's
+// signed CDN URL is fetched without account credentials.
+func grokMediaVideoContentURLFromStatus(body []byte, requestID string, account *Account, cfg *config.Config) (string, bool, error) {
+	rawURL := strings.TrimSpace(gjson.GetBytes(body, "video.url").String())
+	if rawURL == "" || isGrokMediaVideoContentURL(rawURL, requestID) {
+		return "", false, nil
+	}
+	if isGrokMediaAccountContentURL(rawURL, account, cfg, requestID) {
+		return rawURL, false, nil
+	}
+	signedURL, err := grokMediaSignedVideoContentURL(body, requestID)
+	if err != nil {
+		return "", false, err
+	}
+	return signedURL, signedURL != "", nil
+}
+
+func isGrokMediaAccountContentURL(rawURL string, account *Account, cfg *config.Config, requestID string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || !strings.EqualFold(parsed.Scheme, "https") || parsed.User != nil {
+		return false
+	}
+	configuredURL, err := buildGrokMediaURL(account, cfg, GrokMediaEndpointVideoContent, requestID)
+	if err != nil {
+		return false
+	}
+	configured, err := url.Parse(configuredURL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(parsed.Scheme, configured.Scheme) &&
+		strings.EqualFold(parsed.Hostname(), configured.Hostname()) &&
+		normalizeURLPort(parsed) == normalizeURLPort(configured)
+}
+
+func normalizeURLPort(parsed *url.URL) string {
+	if parsed == nil {
+		return ""
+	}
+	if port := parsed.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(parsed.Scheme, "https") {
+		return "443"
+	}
+	return ""
+}
+
 func grokMediaSignedVideoContentURL(body []byte, requestID string) (string, error) {
 	rawURL := strings.TrimSpace(gjson.GetBytes(body, "video.url").String())
 	if rawURL == "" {
@@ -894,10 +948,14 @@ func grokMediaSignedVideoContentURL(body []byte, requestID string) (string, erro
 		return "", nil
 	}
 	parsed, err := url.Parse(rawURL)
+	host := ""
+	if err == nil {
+		host = strings.TrimSpace(parsed.Hostname())
+	}
 	if err != nil || !strings.EqualFold(parsed.Scheme, "https") ||
-		!strings.EqualFold(parsed.Hostname(), "vidgen.x.ai") ||
+		!strings.EqualFold(host, "vidgen.x.ai") ||
 		(parsed.Port() != "" && parsed.Port() != "443") || parsed.User != nil {
-		return "", fmt.Errorf("grok media status returned an unsupported video content URL")
+		return "", fmt.Errorf("grok media status returned an unsupported video content URL host %q", host)
 	}
 	return parsed.String(), nil
 }
