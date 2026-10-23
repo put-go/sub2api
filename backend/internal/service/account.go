@@ -130,6 +130,7 @@ func isOpenAIPersonalAccessTokenAuthMode(value string) bool {
 }
 
 type TempUnschedulableRule struct {
+	Scope           string   `json:"scope,omitempty"` // "account" pauses the whole account; omitted keeps legacy model scope.
 	ErrorCode       int      `json:"error_code"`
 	Keywords        []string `json:"keywords"`
 	DurationMinutes int      `json:"duration_minutes"`
@@ -456,6 +457,7 @@ func (a *Account) GetTempUnschedulableRules() []TempUnschedulableRule {
 		}
 
 		rule := TempUnschedulableRule{
+			Scope:           parseTempUnschedString(entry["scope"]),
 			ErrorCode:       parseTempUnschedInt(entry["error_code"]),
 			Keywords:        parseTempUnschedStrings(entry["keywords"]),
 			DurationMinutes: parseTempUnschedInt(entry["duration_minutes"]),

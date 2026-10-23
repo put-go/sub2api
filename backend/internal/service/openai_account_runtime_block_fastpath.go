@@ -126,6 +126,12 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 		return false
 	}
 
+	// Explicit image 429 rules take precedence over the built-in capability cooldown.
+	if statusCode == http.StatusTooManyRequests && s != nil && s.rateLimitService != nil && account != nil &&
+		s.rateLimitService.HandleTempUnschedulable(stateCtx, account, statusCode, responseBody, canonicalModel...) {
+		return true
+	}
+
 	if isOpenAIImageRateLimitError(statusCode, responseBody) {
 		if s != nil && s.rateLimitService != nil {
 			_ = s.rateLimitService.HandleOpenAIImageRateLimit(stateCtx, account, statusCode, headers, responseBody)

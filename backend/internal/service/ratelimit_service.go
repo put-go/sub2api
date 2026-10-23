@@ -2301,9 +2301,6 @@ func (s *RateLimitService) HandleTempUnschedulable(ctx context.Context, account 
 	if account == nil {
 		return false
 	}
-	if account.IsPoolMode() && !account.IsCustomErrorCodesEnabled() {
-		return false
-	}
 	if !account.ShouldHandleErrorCode(statusCode) {
 		return false
 	}
@@ -2741,7 +2738,7 @@ func (s *RateLimitService) triggerTempUnschedulable(ctx context.Context, account
 	// only this (account, model) pair. Authentication and model-unknown failures
 	// retain the legacy account-wide temporary-unschedulable behavior below.
 	modelKey := firstRequestedModel(requestedModel)
-	if modelKey != "" && statusCode != http.StatusUnauthorized {
+	if rule.Scope != "account" && modelKey != "" && statusCode != http.StatusUnauthorized {
 		if err := s.accountRepo.SetModelRateLimit(ctx, account.ID, modelKey, until, reason); err != nil {
 			slog.Warn("temp_unsched_model_rate_limit_set_failed", "account_id", account.ID, "model", modelKey, "error", err)
 			// The rule matched, so fail over the current request even if persistence

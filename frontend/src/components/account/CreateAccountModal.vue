@@ -2614,6 +2614,14 @@
                   />
                 </div>
                 <div class="sm:col-span-2">
+                  <label class="input-label">{{ t('admin.accounts.tempUnschedulable.scope') }}</label>
+                  <select v-model="rule.scope" class="input">
+                    <option value="model">{{ t('admin.accounts.tempUnschedulable.scopeModel') }}</option>
+                    <option value="account">{{ t('admin.accounts.tempUnschedulable.scopeAccount') }}</option>
+                  </select>
+                  <p class="input-hint">{{ t('admin.accounts.tempUnschedulable.scopeHint') }}</p>
+                </div>
+                <div class="sm:col-span-2">
                   <label class="input-label">{{ t('admin.accounts.tempUnschedulable.keywords') }}</label>
                   <input
                     v-model="rule.keywords"
@@ -4219,6 +4227,7 @@ interface ModelMapping {
 }
 
 interface TempUnschedRuleForm {
+  scope?: 'model' | 'account'
   error_code: number | null
   keywords: string
   duration_minutes: number | null
@@ -5200,13 +5209,14 @@ const removeErrorCode = (code: number) => {
 
 const addTempUnschedRule = (preset?: TempUnschedRuleForm) => {
   if (preset) {
-    tempUnschedRules.value.push({ ...preset })
+    tempUnschedRules.value.push({ ...preset, scope: preset.scope ?? 'model' })
     return
   }
   tempUnschedRules.value.push({
     error_code: null,
     keywords: '',
     duration_minutes: 30,
+    scope: 'model',
     description: ''
   })
 }
@@ -5229,6 +5239,7 @@ const buildTempUnschedRules = (rules: TempUnschedRuleForm[]) => {
     error_code: number
     keywords: string[]
     duration_minutes: number
+    scope: 'model' | 'account'
     description: string
   }> = []
 
@@ -5249,6 +5260,7 @@ const buildTempUnschedRules = (rules: TempUnschedRuleForm[]) => {
       error_code: Math.trunc(errorCode),
       keywords,
       duration_minutes: Math.trunc(duration),
+      scope: rule.scope === 'account' ? 'account' : 'model',
       description: rule.description.trim()
     })
   }

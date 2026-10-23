@@ -413,6 +413,10 @@ export default {
         },
       },
       tempUnschedulable: {
+        scope: 'Scope',
+        scopeModel: 'Model (pause the requested model)',
+        scopeAccount: 'Account (pause the entire account)',
+        scopeHint: 'Model rules apply to the account when the requested model is unknown.',
         title: 'Temp Unschedulable',
         statusTitle: 'Temp Unschedulable Status',
         hint: 'Disable accounts temporarily when error code and keyword both match.',

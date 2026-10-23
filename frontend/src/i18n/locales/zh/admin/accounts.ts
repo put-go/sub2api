@@ -461,6 +461,10 @@ export default {
         tempUnschedulableUntil: '预计 {time} 恢复'
       },
       tempUnschedulable: {
+        scope: '作用范围',
+        scopeModel: '模型级（只冷却本次请求的模型）',
+        scopeAccount: '账户级（暂停整个账号的调度）',
+        scopeHint: '无法识别请求模型时，模型级规则按账户级处理。',
         title: '临时不可调度',
         statusTitle: '临时不可调度状态',
         hint: '当错误码与关键词同时匹配时，账号会在指定时间内被临时禁用。',

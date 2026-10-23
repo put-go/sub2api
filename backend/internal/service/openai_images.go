@@ -743,9 +743,12 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 	var usage OpenAIUsage
 	imageCount := parsed.N
 	var firstTokenMs *int
+	writerSizeBeforeResponse := OpenAIImagesJSONKeepaliveAdjustedWrittenSize(c)
 	if parsed.Stream && isEventStreamResponse(resp.Header) {
 		streamUsage, streamCount, streamSizes, ttft, err := s.handleOpenAIImagesStreamingResponse(resp, c, startTime, nil)
 		if err != nil {
+			err = s.handleOpenAIImagesOAuthResponseError(upstreamCtx, c, account, upstreamModel,
+				safeUpstreamURL(upstreamReq.URL.String()), resp, writerSizeBeforeResponse, err)
 			if streamCount > 0 {
 				return &OpenAIForwardResult{
 					RequestID:        resp.Header.Get("x-request-id"),
@@ -785,7 +788,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 			ImageOutputSizes: imageOutputSizes,
 		}, nil
 	} else {
-		nonStreamUsage, nonStreamCount, nonStreamSizes, err := s.handleOpenAIImagesNonStreamingResponse(upstreamCtx, resp, c, account, parsed)
+		nonStreamUsage, nonStreamCount, nonStreamSizes, err := s.handleOpenAIImagesNonStreamingResponse(upstreamCtx, resp, c, account, parsed, upstreamModel)
 		if err != nil {
 			return nil, err
 		}
@@ -963,9 +966,22 @@ func (s *OpenAIGatewayService) handleOpenAIImagesNonStreamingResponse(
 	c *gin.Context,
 	account *Account,
 	parsed *OpenAIImagesRequest,
+	canonicalModel ...string,
 ) (OpenAIUsage, int, []string, error) {
 	body, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
 	if err != nil {
+		return OpenAIUsage{}, 0, nil, err
+	}
+	// Compatible providers can wrap a structured error in a successful HTTP response.
+	// Apply the same logging and scheduling policy as an HTTP error before writing it.
+	if upstreamErr := openAIImagesUpstreamErrorFromPayload(body); upstreamErr != nil {
+		errorResp := &http.Response{StatusCode: upstreamErr.StatusCode, Header: resp.Header,
+			Body: io.NopCloser(bytes.NewReader(openAIImagesUpstreamErrorResponseBody(upstreamErr)))}
+		model := firstRequestedModel(canonicalModel)
+		if model == "" {
+			model = account.GetMappedModel(parsed.Model)
+		}
+		_, err := s.handleOpenAIImagesErrorResponse(ctx, errorResp, c, account, model)
 		return OpenAIUsage{}, 0, nil, err
 	}
 	body = s.backfillOpenAIImagesB64JSON(ctx, account, parsed, body)
@@ -1014,11 +1030,11 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 	var sseData openAISSEDataAccumulator
 	var streamErr error
 	finish := func() error {
-		if direct == nil {
-			return nil
-		}
 		if streamErr != nil {
 			return streamErr
+		}
+		if direct == nil {
+			return nil
 		}
 		if !seenSSEData || imageCounter.Count() == 0 {
 			return newOpenAIUpstreamStreamReadError(ErrOpenAIUpstreamStreamTruncated)
@@ -1040,6 +1056,9 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 		}
 		mergeOpenAIUsage(&usage, dataBytes)
 		imageCounter.AddSSEData(dataBytes)
+		if upstreamErr := openAIImagesUpstreamErrorFromPayload(dataBytes); upstreamErr != nil {
+			streamErr = upstreamErr
+		}
 		if direct == nil || string(dataBytes) == "[DONE]" {
 			return
 		}
@@ -1137,6 +1156,9 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 		body := bytes.TrimSpace(fallbackBody.Bytes())
 		if len(body) == 0 {
 			return
+		}
+		if upstreamErr := openAIImagesUpstreamErrorFromPayload(body); upstreamErr != nil {
+			streamErr = upstreamErr
 		}
 		mergeOpenAIUsage(&usage, body)
 		imageCounter.AddJSONResponse(body)

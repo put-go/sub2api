@@ -618,6 +618,17 @@ func extractOpenAIImagesUpstreamError(body []byte) *OpenAIImagesUpstreamError {
 	return upstreamErr
 }
 
+// Accept both native JSON errors and Responses-style terminal SSE payloads.
+func openAIImagesUpstreamErrorFromPayload(payload []byte) *OpenAIImagesUpstreamError {
+	if upstreamErr := openAIImagesUpstreamErrorFromSSEPayload(payload); upstreamErr != nil {
+		return upstreamErr
+	}
+	if !gjson.ValidBytes(payload) {
+		return nil
+	}
+	return openAIImagesUpstreamErrorFromGJSON(gjson.GetBytes(payload, "error"), "")
+}
+
 func openAIImagesUpstreamErrorFromSSEPayload(payload []byte) *OpenAIImagesUpstreamError {
 	if !gjson.ValidBytes(payload) {
 		return nil
@@ -828,6 +839,13 @@ func openAIImagesUpstreamErrorFromGJSON(errorObj gjson.Result, upstreamRequestID
 	message := strings.TrimSpace(errorObj.Get("message").String())
 	param := strings.TrimSpace(errorObj.Get("param").String())
 	statusCode := openAIImagesSSEErrorStatus(errType, code)
+	if status := errorObj.Get("status_code").Int(); status >= 400 && status <= 599 {
+		statusCode = int(status)
+	} else if status := errorObj.Get("status").Int(); status >= 400 && status <= 599 {
+		statusCode = int(status)
+	} else if statusCode == http.StatusBadGateway && strings.Contains(strings.ToLower(message), "no available image quota") {
+		statusCode = http.StatusTooManyRequests
+	}
 	if message == "" {
 		message = "Upstream request failed"
 	}
@@ -2169,10 +2187,16 @@ func (s *OpenAIGatewayService) handleOpenAIImagesOAuthResponseError(
 			false,
 		)
 	}
-	if !retryable || responseWritten {
+	// A stream may already be committed when its terminal 429 arrives. Persist
+	// the cooldown and error evidence even when this request cannot fail over.
+	shouldDisable := false
+	if retryable || upstreamErr.StatusCode == http.StatusTooManyRequests {
+		shouldDisable = s.handleOpenAIAccountUpstreamError(ctx, account, upstreamErr.StatusCode, headers, responseBody, requestedModel)
+	}
+	setOpsUpstreamError(c, upstreamErr.StatusCode, upstreamErr.clientMessage(), "")
+	if responseWritten || (!retryable && !shouldDisable) {
 		return err
 	}
-	shouldDisable := s.handleOpenAIAccountUpstreamError(ctx, account, upstreamErr.StatusCode, headers, responseBody, requestedModel)
 	return s.newOpenAIAccountFailoverError(
 		account,
 		upstreamErr.StatusCode,

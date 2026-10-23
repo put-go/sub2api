@@ -136,8 +136,13 @@ func normalizeGrokAccountTestMode(mode string) string {
 	}
 }
 
-// AccountTestService handles account testing operations
+type accountTestErrorRecorder interface {
+	RecordError(context.Context, *OpsInsertErrorLogInput) error
+}
+
+// AccountTestService handles account testing operations.
 type AccountTestService struct {
+	opsErrorRecorder          accountTestErrorRecorder
 	accountRepo               AccountRepository
 	geminiTokenProvider       *GeminiTokenProvider
 	claudeTokenProvider       *ClaudeTokenProvider
@@ -3079,8 +3084,11 @@ func (s *AccountTestService) testOpenAIImageAPIKey(c *gin.Context, ctx context.C
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Failed to read response: %s", err.Error()))
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		return s.sendErrorAndEnd(c, fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body)))
+	if resp.StatusCode >= 400 {
+		return s.failOpenAIImageTest(c, ctx, account, modelID, apiURL, resp, openAIImagesUpstreamErrorFromHTTP(resp.StatusCode, resp.Header, body), body)
+	}
+	if upstreamErr := openAIImagesUpstreamErrorFromPayload(body); upstreamErr != nil {
+		return s.failOpenAIImageTest(c, ctx, account, modelID, apiURL, resp, upstreamErr, body)
 	}
 
 	// Parse {"data": [{"b64_json": "...", "revised_prompt": "..."}]}
@@ -3215,11 +3223,7 @@ func (s *AccountTestService) testOpenAIImageOAuth(c *gin.Context, ctx context.Co
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 		body = redactAgentIdentitySensitiveBodyForAccount(ctx, s.accountRepo, credentialAccount, body)
-		message := strings.TrimSpace(extractUpstreamErrorMessage(body))
-		if message == "" {
-			message = fmt.Sprintf("Image upstream returned %d", resp.StatusCode)
-		}
-		return s.sendErrorAndEnd(c, message)
+		return s.failOpenAIImageTest(c, ctx, account, upstreamModel, targetURL, resp, openAIImagesUpstreamErrorFromHTTP(resp.StatusCode, resp.Header, body), body)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -3228,12 +3232,15 @@ func (s *AccountTestService) testOpenAIImageOAuth(c *gin.Context, ctx context.Co
 	}
 	body = redactAgentIdentitySensitiveBodyForAccount(ctx, s.accountRepo, credentialAccount, body)
 
+	if upstreamErr := openAIImagesUpstreamErrorFromPayload(body); upstreamErr != nil {
+		return s.failOpenAIImageTest(c, ctx, account, upstreamModel, targetURL, resp, upstreamErr, body)
+	}
 	var results []openAIResponsesImageResult
 	if direct {
 		results, err = parseCodexDirectImagesResponse(body)
 	} else {
 		if upstreamErr := extractOpenAIImagesUpstreamError(body); upstreamErr != nil {
-			return s.sendErrorAndEnd(c, upstreamErr.clientMessage())
+			return s.failOpenAIImageTest(c, ctx, account, upstreamModel, targetURL, resp, upstreamErr, openAIImagesUpstreamErrorResponseBody(upstreamErr))
 		}
 		results, _, _, _, _, err = collectOpenAIImagesFromResponsesBody(body)
 	}
@@ -3264,6 +3271,41 @@ func (s *AccountTestService) testOpenAIImageOAuth(c *gin.Context, ctx context.Co
 
 	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 	return nil
+}
+
+// Admin tests use SSE with HTTP 200, and do not pass through the gateway error
+// middleware. Apply scheduling policy and persist an Ops entry explicitly.
+func (s *AccountTestService) failOpenAIImageTest(c *gin.Context, ctx context.Context, account *Account, model, upstreamURL string, resp *http.Response, upstreamErr *OpenAIImagesUpstreamError, body []byte) error {
+	stateCtx, cancel := openAIAccountStateContext(ctx)
+	defer cancel()
+	if s.openaiGatewayService != nil {
+		s.openaiGatewayService.handleOpenAIAccountUpstreamError(stateCtx, account, upstreamErr.StatusCode, resp.Header, body, model)
+	}
+	message := upstreamErr.clientMessage()
+	setOpsUpstreamError(c, upstreamErr.StatusCode, message, "")
+	event := &OpsUpstreamErrorEvent{
+		Platform: account.Platform, AccountID: account.ID, AccountName: account.Name,
+		ProxyID: opsUpstreamProxyID(account), ProxyName: opsUpstreamProxyName(account),
+		UpstreamStatusCode: upstreamErr.StatusCode, UpstreamRequestID: resp.Header.Get("x-request-id"),
+		UpstreamURL: safeUpstreamURL(upstreamURL), Kind: "http_error", Message: message,
+	}
+	appendOpsUpstreamError(c, *event)
+	if s.opsErrorRecorder != nil {
+		path := ""
+		if c.Request.URL != nil {
+			path = c.Request.URL.Path
+		}
+		if err := s.opsErrorRecorder.RecordError(stateCtx, &OpsInsertErrorLogInput{
+			AccountID: &account.ID, Platform: account.Platform, Model: model, UpstreamModel: model,
+			RequestPath: path, Stream: true, ErrorPhase: "upstream", ErrorType: upstreamErr.clientErrorType(),
+			StatusCode: upstreamErr.StatusCode, Severity: "warn", ErrorMessage: message, ErrorSource: "upstream_http", ErrorOwner: "provider",
+			UpstreamStatusCode: &upstreamErr.StatusCode, UpstreamErrorMessage: &message,
+			UpstreamErrors: []*OpsUpstreamErrorEvent{event},
+		}); err != nil {
+			log.Printf("account_test.ops_error_record_failed account_id=%d: %v", account.ID, err)
+		}
+	}
+	return s.sendErrorAndEnd(c, message)
 }
 
 func (s *AccountTestService) sendEvent(c *gin.Context, event TestEvent) {

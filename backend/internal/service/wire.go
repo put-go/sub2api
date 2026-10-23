@@ -264,6 +264,7 @@ func ProvideAccountTestService(
 	openAIGatewayService *OpenAIGatewayService,
 	settingService *SettingService,
 	pluginManager *PluginManager,
+	opsService *OpsService,
 ) *AccountTestService {
 	service := NewAccountTestService(
 		accountRepo,
@@ -275,6 +276,7 @@ func ProvideAccountTestService(
 		cfg,
 		tlsFPProfileService,
 	)
+	service.opsErrorRecorder = opsService
 	service.agentIdentityWS = openAIGatewayService
 	service.SetOpenAIGatewayService(openAIGatewayService)
 	service.SetSettingService(settingService)

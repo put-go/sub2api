@@ -176,7 +176,7 @@ func TestRateLimitService_HandleUpstreamError_ModelTempWriteFailureNeverWidensTo
 	require.Len(t, repo.modelRateLimitCalls, 1)
 }
 
-func TestRateLimitService_HandleTempUnschedulable_PoolModeWithoutCustomPolicySkipsState(t *testing.T) {
+func TestRateLimitService_HandleTempUnschedulable_PoolModeHonorsExplicitRule(t *testing.T) {
 	repo := &modelNotFoundAccountRepoStub{}
 	svc := &RateLimitService{accountRepo: repo}
 	account := openAIModelNotFoundTempAccount()
@@ -190,9 +190,10 @@ func TestRateLimitService_HandleTempUnschedulable_PoolModeWithoutCustomPolicySki
 		"gpt-5.4",
 	)
 
-	require.False(t, handled)
+	require.True(t, handled)
 	require.Zero(t, repo.tempCalls)
-	require.Empty(t, repo.modelRateLimitCalls)
+	require.Len(t, repo.modelRateLimitCalls, 1)
+	require.Equal(t, "gpt-5.4", repo.modelRateLimitCalls[0].scope)
 }
 
 func TestRateLimitService_HandleTempUnschedulable_PoolModeCustomPolicyUsesModelScope(t *testing.T) {
